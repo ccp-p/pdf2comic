@@ -9,6 +9,7 @@ clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 jpeg-encoder = "0.7"
 lopdf = "0.36"
+pdfium-render = "0.8"
 png = "0.17"
 rayon = "1"
 zip = "2"

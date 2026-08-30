@@ -6,6 +6,7 @@ use clap::Parser;
 mod cbz;
 mod epub;
 mod extract;
+mod render;
 
 use extract::extract_images;
 
@@ -37,8 +38,27 @@ fn main() -> Result<()> {
 
     eprintln!("Reading {} ...", args.input.display());
     let quality = if args.lossless { None } else { Some(args.quality) };
-    let images = extract_images(&args.input, quality)?;
-    eprintln!("Extracted {} images.", images.len());
+    let images = match extract_images(&args.input, quality) {
+        Ok(images) if images.len() > 512 => {
+            eprintln!(
+                "Detected layered/tiled page structure ({} image objects); \
+                 falling back to full-page rendering.",
+                images.len()
+            );
+            render::render_pages(&args.input, args.quality)?
+        }
+        Ok(images) => {
+            eprintln!("Extracted {} images.", images.len());
+            images
+        }
+        Err(e) => {
+            eprintln!(
+                "Direct extraction failed ({}); falling back to PDFium rendering.",
+                e
+            );
+            render::render_pages(&args.input, args.quality)?
+        }
+    };
 
     if args.cbz {
         cbz::write_cbz(&output, &images)

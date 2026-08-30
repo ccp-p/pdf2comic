@@ -1,1 +1,11 @@
 /target/
+/pdfium.dll
+/pdfium-win-x64.tgz
+/bin/
+/verify_page1.jpg
+/include/
+/licenses/
+/PDFiumConfig.cmake
+/VERSION
+/args.gn
+/LICENSE

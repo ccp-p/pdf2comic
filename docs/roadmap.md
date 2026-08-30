@@ -11,3 +11,4 @@
 | Fixed-layout EPUB output | completed | `--epub` builds EPUB 3 with one image per page |
 | Verification | completed | fmt, clippy, tests, and release build pass |
 | Real-input fixes | completed | Indirect DecodeParms predictors resolved; --quality re-encode; EPUB verified visually |
+| PDFium render fallback | completed | Layered/tiled PDFs (>512 objects) render full pages; 22 GB bug fixed |
