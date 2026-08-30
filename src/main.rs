@@ -6,7 +6,6 @@ use clap::Parser;
 mod cbz;
 mod epub;
 mod extract;
-mod kindle;
 mod render;
 
 use extract::extract_images;
@@ -21,10 +20,6 @@ struct Args {
     /// Write a CBZ instead of an EPUB.
     #[arg(long)]
     cbz: bool,
-    /// After writing the EPUB, convert to AZW3 with Calibre and copy to a
-    /// connected Kindle.
-    #[arg(long)]
-    kindle: bool,
     /// JPEG quality (1-100) used when re-encoding non-JPEG bitmaps.
     #[arg(long, default_value_t = 95)]
     quality: u8,
@@ -71,10 +66,6 @@ fn main() -> Result<()> {
         epub::write_epub(&output, &images)
     }
     .with_context(|| format!("writing {}", output.display()))?;
-
-    if args.kindle && !args.cbz {
-        kindle::deliver_to_kindle(&output)?;
-    }
 
     eprintln!("Wrote {} ({} pages).", output.display(), images.len());
     Ok(())
