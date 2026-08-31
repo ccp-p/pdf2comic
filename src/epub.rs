@@ -66,7 +66,7 @@ pub fn write_epub(path: &Path, images: &[PageImage]) -> Result<()> {
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="css" href="style.css" media-type="text/css"/>
 {manifest}  </manifest>
-  <spine>
+  <spine page-progression-direction="rtl">
 {spine}  </spine>
 </package>
 "#,

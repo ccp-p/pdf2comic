@@ -3,6 +3,11 @@ name = "pdf2comic"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+lto = "fat"
+strip = true
+codegen-units = 1
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

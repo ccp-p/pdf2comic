@@ -10,12 +10,13 @@ mod render;
 
 use extract::extract_images;
 
-/// Convert an image-based (manga/comic) PDF to a fixed-layout EPUB.
+/// Convert image-based (manga/comic) PDFs to fixed-layout EPUBs.
 #[derive(Parser)]
 struct Args {
-    /// Input PDF file.
-    input: PathBuf,
-    /// Output file. Defaults to the input name with .epub.
+    /// Input PDF files, or one or more directories of PDFs.
+    input: Vec<PathBuf>,
+    /// Output file (single input only). Defaults to the input name.
+    #[arg(long)]
     output: Option<PathBuf>,
     /// Write a CBZ instead of an EPUB.
     #[arg(long)]
@@ -31,22 +32,50 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    let mut pdfs: Vec<PathBuf> = Vec::new();
+    for input in &args.input {
+        if input.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(input)
+                .with_context(|| format!("reading {}", input.display()))?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("pdf")).unwrap_or(false))
+                .collect();
+            found.sort();
+            pdfs.extend(found);
+        } else {
+            pdfs.push(input.clone());
+        }
+    }
+    if pdfs.is_empty() {
+        anyhow::bail!("no PDF files found in the given paths");
+    }
+
+    let mut failed = 0usize;
+    if args.output.is_some() && pdfs.len() > 1 {
+        anyhow::bail!("--output works with a single input file only");
+    }
+    for pdf in &pdfs {
+        let result = run_one(pdf, &args);
+        if let Err(e) = result {
+            eprintln!("FAILED {}: {:#}", pdf.display(), e);
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{} of {} file(s) failed", failed, pdfs.len());
+    }
+    Ok(())
+}
+
+fn run_one(input: &Path, args: &Args) -> Result<()> {
     let output = match &args.output {
         Some(p) => p.clone(),
-        None => default_output(&args.input, if args.cbz { "cbz" } else { "epub" })?,
+        None => default_output(input, if args.cbz { "cbz" } else { "epub" })?,
     };
 
-    eprintln!("Reading {} ...", args.input.display());
     let quality = if args.lossless { None } else { Some(args.quality) };
-    let images = match extract_images(&args.input, quality) {
-        Ok(images) if images.len() > 512 => {
-            eprintln!(
-                "Detected layered/tiled page structure ({} image objects); \
-                 falling back to full-page rendering.",
-                images.len()
-            );
-            render::render_pages(&args.input, args.quality)?
-        }
+    let images = match extract_images(input, quality) {
         Ok(images) => {
             eprintln!("Extracted {} images.", images.len());
             images
@@ -56,7 +85,7 @@ fn main() -> Result<()> {
                 "Direct extraction failed ({}); falling back to PDFium rendering.",
                 e
             );
-            render::render_pages(&args.input, args.quality)?
+            render::render_pages(input, args.quality)?
         }
     };
 

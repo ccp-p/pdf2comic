@@ -5,26 +5,95 @@ use pdfium_render::prelude::*;
 
 use crate::extract::PageImage;
 
+pub struct RenderedPage {
+    pub page_index: usize,
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
 /// Fallback path for PDFs whose pages are compositions of many image
 /// objects (layered or tiled scans). Renders each page to a single JPEG
 /// with PDFium at 2x scale (about 144 dpi).
 pub fn render_pages(pdf_path: &Path, quality: u8) -> Result<Vec<PageImage>> {
-    let pdfium = bind_pdfium()?;
+    let rendered = render_selected(pdf_path, quality, &[])?;
+    Ok(rendered
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| PageImage {
+            name: format!("{:04}.jpg", i + 1),
+            width: p.width,
+            height: p.height,
+            data: p.data,
+        })
+        .collect())
+}
 
+/// Render the given 0-based page indices (empty = all pages). Workers run
+/// in parallel; each thread binds its own PDFium instance and document.
+pub fn render_selected(
+    pdf_path: &Path,
+    quality: u8,
+    page_indices: &[usize],
+) -> Result<Vec<RenderedPage>> {
+    let total = {
+        let pdfium = bind_pdfium()?;
+        let document = pdfium
+            .load_pdf_from_file(pdf_path, None)
+            .with_context(|| format!("opening {} with PDFium", pdf_path.display()))?;
+        document.pages().len() as usize
+    };
+    let indices: Vec<usize> = if page_indices.is_empty() {
+        (0..total).collect()
+    } else {
+        page_indices.to_vec()
+    };
+    eprintln!("Rendering {} pages with PDFium ...", indices.len());
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(indices.len().max(1));
+    let chunk_size = indices.len().div_ceil(workers);
+    let chunks: Vec<&[usize]> = indices.chunks(chunk_size).collect();
+
+    let results: Vec<Result<Vec<RenderedPage>>> = std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                s.spawn(move || render_chunk(pdf_path, quality, chunk))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let mut out = Vec::with_capacity(indices.len());
+    for result in results {
+        out.extend(result?);
+    }
+    Ok(out)
+}
+
+fn render_chunk(
+    pdf_path: &Path,
+    quality: u8,
+    indices: &[usize],
+) -> Result<Vec<RenderedPage>> {
+    let pdfium = bind_pdfium()?;
     let document = pdfium
         .load_pdf_from_file(pdf_path, None)
         .with_context(|| format!("opening {} with PDFium", pdf_path.display()))?;
 
-    let page_count = document.pages().len() as usize;
-    eprintln!("Rendering {} pages with PDFium ...", page_count);
-
-    // PDFium objects are not safe to share across threads; render sequentially.
-    let mut out = Vec::with_capacity(page_count);
-    for (i, page) in document.pages().iter().enumerate() {
+    let mut out = Vec::with_capacity(indices.len());
+    for &index in indices {
+        let page = document
+            .pages()
+            .get(index as u16)
+            .with_context(|| format!("getting page {}", index + 1))?;
         let config = PdfRenderConfig::new().scale_page_by_factor(2.0);
         let bitmap = page
             .render_with_config(&config)
-            .with_context(|| format!("rendering page {}", i + 1))?;
+            .with_context(|| format!("rendering page {}", index + 1))?;
         let (w, h) = (bitmap.width(), bitmap.height());
         let rgba = bitmap.as_rgba_bytes();
 
@@ -36,23 +105,26 @@ pub fn render_pages(pdf_path: &Path, quality: u8) -> Result<Vec<PageImage>> {
             rgb.push(px[2]);
         }
 
+        let (color, rgb) = match crate::extract::try_to_gray(&rgb) {
+            Some(luma) => (jpeg_encoder::ColorType::Luma, luma),
+            None => (jpeg_encoder::ColorType::Rgb, rgb),
+        };
         let mut data = Vec::new();
         let encoder = jpeg_encoder::Encoder::new(&mut data, quality);
         encoder.encode(
             &rgb,
             w.min(u16::MAX as u32) as u16,
             h.min(u16::MAX as u32) as u16,
-            jpeg_encoder::ColorType::Rgb,
+            color,
         )?;
 
-        out.push(PageImage {
-            name: format!("{:04}.jpg", i + 1),
+        out.push(RenderedPage {
+            page_index: index,
             width: w,
             height: h,
             data,
         });
     }
-
     Ok(out)
 }
 

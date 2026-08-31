@@ -37,10 +37,36 @@ pub fn extract_images(path: &Path, quality: Option<u8>) -> Result<Vec<PageImage>
         .map(|page_id| page_image_ids(&doc, *page_id))
         .collect();
 
-    // Unique images across all pages, first-use order preserved.
+    // Layered/tiled pages (hundreds of image objects per page) are rendered
+    // with PDFium; ordinary pages keep the lossless extraction path.
+    let tiled: Vec<usize> = page_object_ids
+        .iter()
+        .enumerate()
+        .filter(|(_, ids)| ids.len() > TILED_PAGE_IMAGES)
+        .map(|(i, _)| i)
+        .collect();
+    let rendered: std::collections::HashMap<usize, crate::render::RenderedPage> =
+        if tiled.is_empty() {
+            Default::default()
+        } else {
+            eprintln!(
+                "{}/{} pages are layered/tiled; rendering those with PDFium ...",
+                tiled.len(),
+                pages.len()
+            );
+            crate::render::render_selected(path, quality.unwrap_or(95), &tiled)?
+                .into_iter()
+                .map(|p| (p.page_index, p))
+                .collect()
+        };
+
+    // Unique images across ordinary pages, first-use order preserved.
     let mut unique: Vec<ObjectId> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for ids in &page_object_ids {
+    for ids in page_object_ids.iter() {
+        if ids.len() > TILED_PAGE_IMAGES {
+            continue;
+        }
         for id in ids {
             if seen.insert(*id) {
                 unique.push(*id);
@@ -66,7 +92,18 @@ pub fn extract_images(path: &Path, quality: Option<u8>) -> Result<Vec<PageImage>
 
     let mut out = Vec::new();
     let mut counter = 0usize;
-    for ids in &page_object_ids {
+    for (page_idx, ids) in page_object_ids.iter().enumerate() {
+        if ids.len() > TILED_PAGE_IMAGES {
+            counter += 1;
+            let r = rendered.get(&page_idx).context("rendered page missing")?;
+            out.push(PageImage {
+                name: format!("{:04}.jpg", counter),
+                width: r.width,
+                height: r.height,
+                data: r.data.clone(),
+            });
+            continue;
+        }
         for id in ids {
             counter += 1;
             let img = &images[index_of[id]];
@@ -80,6 +117,8 @@ pub fn extract_images(path: &Path, quality: Option<u8>) -> Result<Vec<PageImage>
     }
     Ok(out)
 }
+
+const TILED_PAGE_IMAGES: usize = 8;
 
 /// Image XObject ids referenced by one page, sorted by resource name.
 fn page_image_ids(doc: &Document, page_id: ObjectId) -> Vec<ObjectId> {
@@ -279,6 +318,17 @@ fn encode_bitmap(
         4 => encode_cmyk_as_rgb(data, width, height, inverted)?,
         other => bail!("unsupported colorspace with {} components", other),
     };
+    // Manga scans stored as RGB are usually near-gray; encoding them as
+    // grayscale JPEG saves ~50% with no visible loss. Full-color pages
+    // (per-image check, conservative threshold) keep their colors.
+    let (color_type, bytes) = if color_type == png::ColorType::Rgb {
+        match try_to_gray(&bytes) {
+            Some(luma) => (png::ColorType::Grayscale, luma),
+            None => (png::ColorType::Rgb, bytes),
+        }
+    } else {
+        (color_type, bytes)
+    };
 
     let (ext, data) = match quality {
         None => {
@@ -309,6 +359,26 @@ fn encode_bitmap(
         height,
         data,
     })
+}
+
+/// Returns a grayscale channel when the sampled pixels carry no real
+/// chroma; None means "genuinely colorful, keep RGB".
+pub(crate) fn try_to_gray(rgb: &[u8]) -> Option<Vec<u8>> {
+    for (i, px) in rgb.chunks_exact(3).enumerate() {
+        if i % 4 != 0 {
+            continue;
+        }
+        let (r, g, b) = (px[0] as u16, px[1] as u16, px[2] as u16);
+        if r.max(g).max(b) - r.min(g).min(b) > 12 {
+            return None;
+        }
+    }
+    let mut luma = Vec::with_capacity(rgb.len() / 3);
+    for px in rgb.chunks_exact(3) {
+        let (r, g, b) = (px[0] as u32, px[1] as u32, px[2] as u32);
+        luma.push(((r * 299 + g * 587 + b * 114) / 1000) as u8);
+    }
+    Some(luma)
 }
 
 fn filter_names(dict: &lopdf::Dictionary) -> Result<Vec<String>> {
@@ -566,5 +636,19 @@ mod tests {
         let data = vec![0, 0, 0, 255];
         let (_, rgb) = encode_cmyk_as_rgb(&data, 1, 1, false).unwrap();
         assert_eq!(rgb, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn near_gray_image_converts_to_luma() {
+        let rgb = vec![100u8, 102, 98, 200, 201, 199];
+        let luma = try_to_gray(&rgb).unwrap();
+        assert_eq!(luma.len(), 2);
+        assert!(luma[0] > 90 && luma[0] < 110);
+    }
+
+    #[test]
+    fn colorful_image_stays_rgb() {
+        let rgb = vec![200u8, 30, 30, 30, 200, 30];
+        assert!(try_to_gray(&rgb).is_none());
     }
 }
